@@ -9,11 +9,14 @@ writes the result to spec-file-<platform>.txt.
 Run from the repository root, with conda available on the command line:
     python generate_spec_files.py                  # all platforms
     python generate_spec_files.py osx-arm64        # specific platform
+    python generate_spec_files.py --check          # check for stale files
 """
 
+import argparse
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import urllib.error
@@ -51,10 +54,10 @@ def read_environment_packages():
     return names
 
 
-def read_reference_versions():
-    """Return {package name: version} from the Windows spec file"""
+def read_spec_versions(path):
+    """Return {package name: version} from a spec file"""
     versions = {}
-    for line in REFERENCE_SPEC.read_text().splitlines():
+    for line in path.read_text().splitlines():
         if not line.startswith("http"):
             continue
         filename = line.rsplit("/", 1)[1]
@@ -64,10 +67,22 @@ def read_reference_versions():
     return versions
 
 
+def read_reference_versions():
+    """Return {package name: version} from the Windows spec file"""
+    return read_spec_versions(REFERENCE_SPEC)
+
+
+def find_conda():
+    conda = os.environ.get("CONDA_EXE") or shutil.which("conda")
+    if not conda:
+        sys.exit("conda not found")
+    return conda
+
+
 def solve(platform, specs, constraints):
     """Solve the environment for a platform and return the package URLs"""
     command = [
-        "conda", "create", "--name", "_spec_file_solve", "--dry-run", "--json",
+        find_conda(), "create", "--name", "_spec_file_solve", "--dry-run", "--json",
         "--platform", platform,
         "--override-channels", "--channel", "conda-forge",
         *specs,
@@ -79,8 +94,11 @@ def solve(platform, specs, constraints):
     if target_os != current_os:
         environment.update(VIRTUAL_PACKAGE_OVERRIDES.get(target_os, {}))
     result = subprocess.run(command, capture_output=True, text=True,
-                            env=environment, shell=sys.platform == "win32")
-    data = json.loads(result.stdout)
+                            env=environment)
+    try:
+        data = json.loads(result.stdout)
+    except json.JSONDecodeError:
+        raise RuntimeError(result.stderr or result.stdout)
     if not data.get("success"):
         raise RuntimeError(data.get("message", result.stderr))
     urls = []
@@ -114,17 +132,67 @@ def write_spec_file(platform, urls):
     print(f"wrote {path.name} ({len(urls)} packages)")
 
 
+def check_spec_file(platform, required, versions):
+    path = ROOT / f"spec-file-{platform}.txt"
+    if not path.exists():
+        return [f"{path.name} does not exist"]
+    lines = path.read_text().splitlines()
+    problems = []
+    if f"# platform: {platform}" not in lines:
+        problems.append(f"{path.name} is missing '# platform: {platform}'")
+    if "@EXPLICIT" not in lines:
+        problems.append(f"{path.name} is missing '@EXPLICIT'")
+    for line in lines:
+        if line.startswith("http") and f"/{platform}/" not in line and "/noarch/" not in line:
+            problems.append(f"{path.name} has a package for another platform: {line}")
+    platform_versions = read_spec_versions(path)
+    for name in required + EXTRA_PINNED:
+        if name not in platform_versions:
+            if name in required:
+                problems.append(f"{path.name} is missing {name}")
+        elif platform_versions[name] != versions[name]:
+            problems.append(f"{path.name} has {name}={platform_versions[name]}, "
+                            f"{REFERENCE_SPEC.name} has {versions[name]}")
+    return problems
+
+
+def check(platforms, required, versions):
+    problems = []
+    for platform in platforms:
+        problems += check_spec_file(platform, required, versions)
+    for problem in problems:
+        print(problem)
+    if problems:
+        sys.exit("spec files are out of date, run: python generate_spec_files.py")
+    print(f"spec files match {REFERENCE_SPEC.name}")
+
+
 def main():
-    platforms = sys.argv[1:] or PLATFORMS
+    parser = argparse.ArgumentParser(
+        description="Generate the macOS and Linux spec files from the Windows spec file.")
+    parser.add_argument("platforms", nargs="*", metavar="platform",
+                        help=f"one of {', '.join(PLATFORMS)} (default: all)")
+    parser.add_argument("--check", action="store_true",
+                        help="validate the existing spec files instead of generating them")
+    args = parser.parse_args()
+    for platform in args.platforms:
+        if platform not in PLATFORMS:
+            parser.error(f"unknown platform {platform}, choose from {', '.join(PLATFORMS)}")
+    platforms = args.platforms or PLATFORMS
     versions = read_reference_versions()
     specs = []
+    required = []
     for name in read_environment_packages():
         if name == "pip":
             specs.append(name)
         elif name in versions:
             specs.append(f"{name}={versions[name]}")
+            required.append(name)
         else:
             sys.exit(f"{name} is in environment.yml but not in {REFERENCE_SPEC.name}")
+    if args.check:
+        check(platforms, required, versions)
+        return
     constraints = [f"{name}={versions[name]}" for name in EXTRA_PINNED]
     print("required:", " ".join(specs))
     print("constrained:", " ".join(constraints))

@@ -88,7 +88,9 @@ dependencies:
     1. on Windows, with the new environment activated, run: `conda list --explicit > spec-file-win-64.txt`
     2. then run: `python generate_spec_files.py`  
     This creates the spec files for the other platforms using the same package versions as the Windows spec file. Solving can take several minutes per platform. If a platform fails to solve, the version of one of the packages may not be available for that platform.
-    3. Commit all four spec files together.
+    3. run: `python generate_spec_files.py --check`  
+    This checks that the spec files match `spec-file-win-64.txt`.
+    4. Commit all four spec files together.
 
 Everyone on the team should re-build their environments using the updated spec file for their platform (see [above section](#to-create-an-environment))
 
